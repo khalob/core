@@ -503,6 +503,9 @@ class ResultStream:
     # Override
     _override_media_path: Path | None = None
 
+    # Cache cleanup control
+    replaced: bool = field(default=False, init=False)
+
     @cached_property
     def url(self) -> str:
         """Get the URL to stream the result."""
@@ -675,6 +678,9 @@ class DictCleaning[T: HasLastUsed]:
         now = monotonic()
 
         for cache_key, info in list(memcache.items()):
+            if hasattr(info, "replaced") and not info.replaced:
+                # It's a ResultStream that hasn't been replaced yet — keep it alive.
+                continue
             if info.last_used + maxage < now:
                 _LOGGER.debug("Cleaning up %s", cache_key)
                 del memcache[cache_key]
@@ -842,6 +848,25 @@ class SpeechManager:
             hass=self.hass,
             _manager=self,
         )
+
+        # Find pre-existing stream, using hashed options key.
+        old_stream_key = None
+        for existing_token, stream in self.token_to_stream.items():
+            # Match per-satellite signature
+            same_satellite = (
+                stream.engine == engine
+                and stream.language == language
+                and _hash_options(stream.options) == _hash_options(options)
+                and hasattr(stream, "_result_cache") and stream._result_cache.done() and not stream.replaced
+            )
+            if same_satellite:
+                old_stream_key = existing_token
+                break
+
+        if old_stream_key:
+            _LOGGER.debug("Marking old ResultStream %s as replaced", old_stream_key)
+            self.token_to_stream[old_stream_key].replaced = True
+        
         self.token_to_stream[token] = result_stream
         self.token_to_stream_cleanup.schedule()
         return result_stream
